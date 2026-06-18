@@ -85,6 +85,8 @@ export component AppWindow inherits Window {
     callback apply-shift-clicked();
     callback fwd-lighthouse-to-estimator-toggled(bool);
     callback fwd-loco-to-estimator-toggled(bool);
+    callback delete-point-clicked(int);
+    callback duplicate-point-clicked(int);
 
     HorizontalLayout {
         spacing: 0px;
@@ -336,6 +338,31 @@ export component AppWindow inherits Window {
                                 Text { text: r.dz; font-size: 11px; width: 48px; vertical-alignment: center; }
                                 Text { text: r.lh-std; font-size: 11px; width: 48px; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
                                 Text { text: r.loco-std; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
+
+                                // Delete/duplicate this point — only once the run is done, to avoid
+                                // editing a table that's still being appended to mid-capture.
+                                if root.has-final-result: TouchArea {
+                                    width: 26px;
+                                    clicked => { root.duplicate-point-clicked(r.point - 1); }
+                                    Text {
+                                        text: "Dup";
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                        color: Palette.foreground.transparentize(0.2);
+                                    }
+                                }
+                                if root.has-final-result: TouchArea {
+                                    width: 26px;
+                                    clicked => { root.delete-point-clicked(r.point - 1); }
+                                    Text {
+                                        text: "Del";
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                        color: #c62828;
+                                    }
+                                }
                             }
                         }
                     }

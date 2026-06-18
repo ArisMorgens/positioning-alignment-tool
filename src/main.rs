@@ -139,6 +139,41 @@ const LIVE_WINDOW: Duration = Duration::from_secs(5);
 /// Half-extent (in meters) of the ground grid drawn in the live 3D view.
 const VIZ_GRID_RANGE: i32 = 8;
 
+/// Loco anchor / Lighthouse base station marker colors in the live 3D view.
+const ANCHOR_COLOR: [f32; 3] = [1.0, 0.65, 0.0];
+const BASE_STATION_COLOR: [f32; 3] = [0.85, 0.35, 0.95];
+/// Color for an anchor/base station that's currently not contributing to the
+/// position estimate (not in Loco's active-anchor list / not set in
+/// `lighthouse.bsActive`), e.g. blocked from view or out of range.
+const INACTIVE_MARKER_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
+
+/// A single anchor/base station position, keyed by its firmware-assigned ID
+/// so its active/visible status (looked up separately) can be applied at
+/// render time.
+#[derive(Clone, Copy)]
+struct PositionedMarker {
+    id: u8,
+    pos: [f32; 3],
+}
+
+/// Loco anchor and Lighthouse base station positions for the live 3D view,
+/// fetched once on connect via the Memory subsystem (mirrors cfclient's LPS/
+/// Lighthouse tabs). `show_anchors`/`show_base_stations` track the live
+/// `loco.fwdToEstimator`/`lighthouse.fwdToEstimator` params so each system's
+/// markers appear only while actually forwarded to the estimator;
+/// `active_anchor_ids`/`active_bs_mask` track which individual anchors/base
+/// stations are currently contributing data, so those markers can be greyed
+/// out (rather than removed) while temporarily not visible.
+#[derive(Default)]
+struct PositioningMarkers {
+    anchors: Vec<PositionedMarker>,
+    base_stations: Vec<PositionedMarker>,
+    show_anchors: bool,
+    show_base_stations: bool,
+    active_anchor_ids: std::collections::HashSet<u8>,
+    active_bs_mask: u16,
+}
+
 #[derive(Clone, Copy)]
 struct LiveSample {
     t: Instant,
@@ -185,7 +220,6 @@ fn live_std(state: &LiveState) -> (f32, f32, f32) {
 
 #[derive(Clone)]
 struct PointResult {
-    point_index: usize,
     base: PositionStats,
     moving: PositionStats,
 }
@@ -260,14 +294,116 @@ fn build_alignment_result(
         point_count: results.len(),
         points: results
             .iter()
-            .map(|r| PointResultYaml {
-                point: r.point_index + 1,
+            .enumerate()
+            .map(|(i, r)| PointResultYaml {
+                point: i + 1,
                 base: XyzValue { x: r.base.mean_x, y: r.base.mean_y, z: r.base.mean_z },
                 moving: XyzValue { x: r.moving.mean_x, y: r.moving.mean_y, z: r.moving.mean_z },
                 shift: XyzValue { x: r.dx(), y: r.dy(), z: r.dz() },
             })
             .collect(),
     }
+}
+
+/// The full point-by-point results of the most recently completed alignment
+/// run, kept around so individual points can be deleted/duplicated and the
+/// final result (and pending YAML) recomputed without re-running.
+struct CapturedResults {
+    results: Vec<PointResult>,
+    base_kind: SystemKind,
+    moving_kind: SystemKind,
+}
+
+/// Builds the displayed table row for `results[point_idx]`. The 1-based "Pt"
+/// number comes from `point_idx` (its position in the vector), not anything
+/// captured at measurement time, so renumbering after delete/duplicate is automatic.
+fn point_result_row(point_idx: usize, point: &PointResult, base_kind: SystemKind, moving_kind: SystemKind) -> PointResultData {
+    // Per-system combined std dev for this point, regardless of which
+    // role (base/moving) each system played.
+    let lh_std = match (base_kind, moving_kind) {
+        (SystemKind::Lighthouse, _) => Some(point.base.total_std()),
+        (_, SystemKind::Lighthouse) => Some(point.moving.total_std()),
+        _ => None,
+    };
+    let loco_std = match (base_kind, moving_kind) {
+        (SystemKind::Loco, _) => Some(point.base.total_std()),
+        (_, SystemKind::Loco) => Some(point.moving.total_std()),
+        _ => None,
+    };
+
+    PointResultData {
+        point: (point_idx + 1) as i32,
+        base_x: format!("{:.3}", point.base.mean_x).into(),
+        base_y: format!("{:.3}", point.base.mean_y).into(),
+        base_z: format!("{:.3}", point.base.mean_z).into(),
+        moving_x: format!("{:.3}", point.moving.mean_x).into(),
+        moving_y: format!("{:.3}", point.moving.mean_y).into(),
+        moving_z: format!("{:.3}", point.moving.mean_z).into(),
+        dx: format!("{:+.3}", point.dx()).into(),
+        dy: format!("{:+.3}", point.dy()).into(),
+        dz: format!("{:+.3}", point.dz()).into(),
+        lh_std: lh_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string()).into(),
+        loco_std: loco_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string()).into(),
+    }
+}
+
+/// Recomputes the alignment result from `results` and pushes it to the UI
+/// (point table, shift vector, save-ready YAML). Used both when a measurement
+/// run completes and after a point is deleted/duplicated. An empty `results`
+/// clears the final-result section instead of computing an empty average.
+fn refresh_results_ui(
+    ui_weak: &slint::Weak<AppWindow>,
+    pending_yaml: &Arc<Mutex<Option<(String, String)>>>,
+    pending_shift: &Arc<Mutex<Option<(SystemKind, XyzValue)>>>,
+    results: &[PointResult],
+    base_kind: SystemKind,
+    moving_kind: SystemKind,
+    status_text: &str,
+) {
+    if results.is_empty() {
+        *pending_yaml.lock().unwrap() = None;
+        *pending_shift.lock().unwrap() = None;
+        ui_set(ui_weak, |ui| {
+            ui.set_point_results(slint::ModelRc::new(slint::VecModel::from(vec![])));
+            ui.set_has_final_result(false);
+            ui.set_status_text("No measurement points remain.".into());
+        });
+        return;
+    }
+
+    let rows: Vec<PointResultData> = results
+        .iter()
+        .enumerate()
+        .map(|(i, p)| point_result_row(i, p, base_kind, moving_kind))
+        .collect();
+
+    let ar = build_alignment_result(results, base_kind, moving_kind);
+    let yaml = serde_yaml::to_string(&ar).unwrap_or_default();
+    let file_stem = format!(
+        "alignment_{}_to_{}",
+        ar.moving_system.to_lowercase(),
+        ar.base_system.to_lowercase()
+    );
+    *pending_yaml.lock().unwrap() = Some((format!("{file_stem}.yaml"), yaml));
+    *pending_shift.lock().unwrap() = Some((moving_kind, ar.shift_vector));
+
+    let shift_x = format!("{:+.3}", ar.shift_vector.x);
+    let shift_y = format!("{:+.3}", ar.shift_vector.y);
+    let shift_z = format!("{:+.3}", ar.shift_vector.z);
+    let base_system = ar.base_system.clone();
+    let moving_system = ar.moving_system.clone();
+    let status_text = status_text.to_string();
+
+    ui_set(ui_weak, move |ui| {
+        ui.set_point_results(slint::ModelRc::new(slint::VecModel::from(rows)));
+        ui.set_has_final_result(true);
+        ui.set_shift_x(shift_x.into());
+        ui.set_shift_y(shift_y.into());
+        ui.set_shift_z(shift_z.into());
+        ui.set_result_base_system(base_system.into());
+        ui.set_result_moving_system(moving_system.into());
+        ui.set_status_text(status_text.into());
+    });
 }
 
 // ── Moving-system position file shifting ──────────────────────────────────────
@@ -389,6 +525,8 @@ enum AppCommand {
     ApplyShift,
     SetLighthouseFwdToEstimator(bool),
     SetLocoFwdToEstimator(bool),
+    DeletePoint(usize),
+    DuplicatePoint(usize),
 }
 
 // ── UI update helpers ─────────────────────────────────────────────────────────
@@ -506,6 +644,82 @@ async fn get_estimator_sources(cf: &crazyflie_lib::Crazyflie) -> Result<(bool, b
     })
     .await?;
     Ok((lighthouse != 0, loco != 0))
+}
+
+/// Continuously polls Loco anchor and Lighthouse base station data via the
+/// Memory subsystem — both their active/visible status and the position of
+/// any unit not yet known. An anchor not present in the Loco ID list at
+/// connect time (e.g. it hasn't been ranged yet) is simply absent from that
+/// first read; only a recurring poll picks it up once it does appear, which
+/// is what cfclient's `AnchorStateMachine` does by polling indefinitely
+/// rather than reading once. Known units are never removed, only merged into
+/// — mirrors cfclient keeping every anchor/base station it has ever seen.
+const POSITIONING_POLL: Duration = Duration::from_secs(1);
+
+async fn poll_positioning_markers(cf: Arc<crazyflie_lib::Crazyflie>, markers: Arc<Mutex<PositioningMarkers>>) {
+    use crazyflie_lib::subsystems::memory::{LighthouseMemory, LocoMemory2, MemoryType};
+
+    loop {
+        if let Some(device) = cf.memory.get_memories(Some(MemoryType::Loco2)).first().cloned().cloned() {
+            if let Some(Ok(mem)) = cf.memory.open_memory::<LocoMemory2>(device).await {
+                if let Ok(active_ids) = mem.read_active_id_list().await {
+                    markers.lock().unwrap().active_anchor_ids = active_ids.into_iter().collect();
+                }
+
+                if let Ok(id_list) = mem.read_id_list().await {
+                    let known_ids: std::collections::HashSet<u8> =
+                        markers.lock().unwrap().anchors.iter().map(|a| a.id).collect();
+                    for id in id_list {
+                        if known_ids.contains(&id) {
+                            continue;
+                        }
+                        if let Ok(data) = mem.read_anchor_data(id).await {
+                            if data.is_valid {
+                                markers.lock().unwrap().anchors.push(PositionedMarker { id, pos: data.position });
+                            }
+                        }
+                    }
+                }
+
+                cf.memory.close_memory(mem).await.ok();
+            }
+        }
+
+        if let Some(device) = cf.memory.get_memories(Some(MemoryType::Lighthouse)).first().cloned().cloned() {
+            if let Some(Ok(mem)) = cf.memory.open_memory::<LighthouseMemory>(device).await {
+                if let Ok(geos) = mem.read_all_geometries().await {
+                    let mut m = markers.lock().unwrap();
+                    for (&id, g) in &geos {
+                        match m.base_stations.iter_mut().find(|b| b.id == id) {
+                            Some(existing) => existing.pos = g.origin,
+                            None => m.base_stations.push(PositionedMarker { id, pos: g.origin }),
+                        }
+                    }
+                }
+                cf.memory.close_memory(mem).await.ok();
+            }
+        }
+
+        tokio::time::sleep(POSITIONING_POLL).await;
+    }
+}
+
+/// Polls `lighthouse.fwdToEstimator`/`loco.fwdToEstimator` so the 3D view's
+/// anchor/base-station markers track the live estimator-forwarding state —
+/// including the automatic toggling `run_measurement` does mid-capture.
+/// Runs until aborted (on Disconnect); a failed read is skipped, not fatal,
+/// since the param subsystem can be briefly busy alongside live logging.
+const ESTIMATOR_SOURCE_POLL: Duration = Duration::from_millis(300);
+
+async fn watch_estimator_sources(cf: Arc<crazyflie_lib::Crazyflie>, markers: Arc<Mutex<PositioningMarkers>>) {
+    loop {
+        if let Ok((lighthouse, loco)) = get_estimator_sources(&cf).await {
+            let mut m = markers.lock().unwrap();
+            m.show_base_stations = lighthouse;
+            m.show_anchors = loco;
+        }
+        tokio::time::sleep(ESTIMATOR_SOURCE_POLL).await;
+    }
 }
 
 async fn reset_estimator(cf: &crazyflie_lib::Crazyflie) -> Result<()> {
@@ -689,7 +903,7 @@ async fn run_measurement(
         }
 
         // ── Accumulate result ───────────────────────────────────────
-        let point = PointResult { point_index: point_idx, base: base_stats, moving: moving_stats };
+        let point = PointResult { base: base_stats, moving: moving_stats };
 
         {
             let dx = format!("{:+.3}", point.dx());
@@ -754,6 +968,7 @@ async fn run_live_logging(
     cf: Arc<crazyflie_lib::Crazyflie>,
     log_period_ms: u64,
     live_state: Arc<Mutex<LiveState>>,
+    markers: Arc<Mutex<PositioningMarkers>>,
     sample_tx: broadcast::Sender<(f32, f32, f32)>,
     ui_weak: slint::Weak<AppWindow>,
 ) {
@@ -771,11 +986,14 @@ async fn run_live_logging(
         log_block.add_variable("stateEstimate.x").await?;
         log_block.add_variable("stateEstimate.y").await?;
         log_block.add_variable("stateEstimate.z").await?;
+        // Optional: only present when a Lighthouse deck is installed. Its absence
+        // must not abort live position logging, hence no `?` on this one.
+        let has_bs_active = log_block.add_variable("lighthouse.bsActive").await.is_ok();
         let period = crazyflie_lib::subsystems::log::LogPeriod::from_millis(log_period_ms)?;
-        Ok(log_block.start(period).await?)
+        Ok((log_block.start(period).await?, has_bs_active))
     };
 
-    let log_stream = match with_timeout("starting live log block", setup).await {
+    let (log_stream, has_bs_active) = match with_timeout("starting live log block", setup).await {
         Ok(s) => s,
         Err(e) => {
             ui_set(&ui_weak, move |ui| {
@@ -797,6 +1015,11 @@ async fn run_live_logging(
 
         // Best-effort: no measurement may be subscribed right now.
         let _ = sample_tx.send((x, y, z));
+
+        if has_bs_active {
+            let mask: u16 = data.data.get("lighthouse.bsActive").and_then(|v| (*v).try_into().ok()).unwrap_or(0);
+            markers.lock().unwrap().active_bs_mask = mask;
+        }
 
         let (std_x, std_y, std_z) = {
             let mut state = live_state.lock().unwrap();
@@ -824,6 +1047,8 @@ async fn async_backend(
     pending_shift: Arc<Mutex<Option<(SystemKind, XyzValue)>>>,
     sample_tx: broadcast::Sender<(f32, f32, f32)>,
     live_state: Arc<Mutex<LiveState>>,
+    markers: Arc<Mutex<PositioningMarkers>>,
+    captured: Arc<Mutex<Option<CapturedResults>>>,
 ) {
     let link_context = Arc::new(crazyflie_link::LinkContext::new());
     let toc_cache = FileTocCache::new();
@@ -835,6 +1060,10 @@ async fn async_backend(
 
     // Continuous live-position logging task, started on Connect and aborted on Disconnect.
     let mut live_log_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Polls the fwdToEstimator params for the 3D view's marker visibility; same lifecycle as `live_log_task`.
+    let mut estimator_watch_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Polls anchor/base-station positions and active state for the 3D view; same lifecycle as `live_log_task`.
+    let mut positioning_poll_task: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -886,16 +1115,22 @@ async fn async_backend(
                                 ui.set_fwd_lighthouse_to_estimator(lighthouse);
                                 ui.set_fwd_loco_to_estimator(loco);
                             });
+                            let mut m = markers.lock().unwrap();
+                            m.show_base_stations = lighthouse;
+                            m.show_anchors = loco;
                         }
 
                         live_state.lock().unwrap().buffer.clear();
                         live_log_task = Some(tokio::spawn(run_live_logging(
-                            connected_cf,
+                            connected_cf.clone(),
                             log_period_ms,
                             live_state.clone(),
+                            markers.clone(),
                             sample_tx.clone(),
                             ui_weak.clone(),
                         )));
+                        estimator_watch_task = Some(tokio::spawn(watch_estimator_sources(connected_cf.clone(), markers.clone())));
+                        positioning_poll_task = Some(tokio::spawn(poll_positioning_markers(connected_cf, markers.clone())));
                     }
                     Err(e) => {
                         ui_set(&ui_weak, move |ui| {
@@ -911,7 +1146,14 @@ async fn async_backend(
                 if let Some(handle) = live_log_task.take() {
                     handle.abort();
                 }
+                if let Some(handle) = estimator_watch_task.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = positioning_poll_task.take() {
+                    handle.abort();
+                }
                 live_state.lock().unwrap().buffer.clear();
+                *markers.lock().unwrap() = PositioningMarkers::default();
                 ui_set(&ui_weak, |ui| {
                     ui.set_is_connected(false);
                     ui.set_is_running(false);
@@ -954,6 +1196,7 @@ async fn async_backend(
                     let stop_flag2 = stop_flag.clone();
                     let pending_yaml2 = pending_yaml.clone();
                     let pending_shift2 = pending_shift.clone();
+                    let captured2 = captured.clone();
                     let base_kind = config.base_kind;
                     let moving_kind = config.moving_kind;
                     let sample_tx2 = sample_tx.clone();
@@ -983,37 +1226,20 @@ async fn async_backend(
                             return;
                         }
 
-                        // Compute final result
-                        let ar = build_alignment_result(&results, base_kind, moving_kind);
-                        let yaml = serde_yaml::to_string(&ar).unwrap_or_default();
-                        let file_stem = format!(
-                            "alignment_{}_to_{}",
-                            ar.moving_system.to_lowercase(),
-                            ar.base_system.to_lowercase()
+                        *captured2.lock().unwrap() = Some(CapturedResults {
+                            results: results.clone(),
+                            base_kind,
+                            moving_kind,
+                        });
+                        refresh_results_ui(
+                            &ui_weak2, &pending_yaml2, &pending_shift2, &results, base_kind, moving_kind,
+                            "Alignment complete. Save the result or run again.",
                         );
-                        *pending_yaml2.lock().unwrap() = Some((format!("{file_stem}.yaml"), yaml));
-                        *pending_shift2.lock().unwrap() = Some((moving_kind, ar.shift_vector));
-
-                        let shift_x = format!("{:+.3}", ar.shift_vector.x);
-                        let shift_y = format!("{:+.3}", ar.shift_vector.y);
-                        let shift_z = format!("{:+.3}", ar.shift_vector.z);
-                        let base_system = ar.base_system.clone();
-                        let moving_system = ar.moving_system.clone();
-
-                        ui_set(&ui_weak2, move |ui| {
+                        ui_set(&ui_weak2, |ui| {
                             ui.set_is_running(false);
                             ui.set_is_waiting_for_capture(false);
                             ui.set_is_measuring(false);
                             ui.set_current_mode("".into());
-                            ui.set_has_final_result(true);
-                            ui.set_shift_x(shift_x.into());
-                            ui.set_shift_y(shift_y.into());
-                            ui.set_shift_z(shift_z.into());
-                            ui.set_result_base_system(base_system.into());
-                            ui.set_result_moving_system(moving_system.into());
-                            ui.set_status_text(
-                                "Alignment complete. Save the result or run again.".into(),
-                            );
                         });
                     });
                 }
@@ -1074,6 +1300,42 @@ async fn async_backend(
                 }
             }
 
+            AppCommand::DeletePoint(idx) => {
+                let snapshot = {
+                    let mut guard = captured.lock().unwrap();
+                    guard.as_mut().map(|cr| {
+                        if idx < cr.results.len() {
+                            cr.results.remove(idx);
+                        }
+                        (cr.results.clone(), cr.base_kind, cr.moving_kind)
+                    })
+                };
+                if let Some((results, base_kind, moving_kind)) = snapshot {
+                    refresh_results_ui(
+                        &ui_weak, &pending_yaml, &pending_shift, &results, base_kind, moving_kind,
+                        "Point removed. Save the result or run again.",
+                    );
+                }
+            }
+
+            AppCommand::DuplicatePoint(idx) => {
+                let snapshot = {
+                    let mut guard = captured.lock().unwrap();
+                    guard.as_mut().map(|cr| {
+                        if let Some(p) = cr.results.get(idx).cloned() {
+                            cr.results.insert(idx + 1, p);
+                        }
+                        (cr.results.clone(), cr.base_kind, cr.moving_kind)
+                    })
+                };
+                if let Some((results, base_kind, moving_kind)) = snapshot {
+                    refresh_results_ui(
+                        &ui_weak, &pending_yaml, &pending_shift, &results, base_kind, moving_kind,
+                        "Point duplicated. Save the result or run again.",
+                    );
+                }
+            }
+
             AppCommand::ApplyShift => {
                 let pending = *pending_shift.lock().unwrap();
                 if let Some((moving_kind, shift)) = pending {
@@ -1101,6 +1363,8 @@ fn main() {
     // Continuous live-position broadcast + rolling 5s buffer (shared with the 3D view).
     let (sample_tx, _) = broadcast::channel::<(f32, f32, f32)>(256);
     let live_state: Arc<Mutex<LiveState>> = Arc::new(Mutex::new(LiveState::default()));
+    let markers: Arc<Mutex<PositioningMarkers>> = Arc::new(Mutex::new(PositioningMarkers::default()));
+    let captured: Arc<Mutex<Option<CapturedResults>>> = Arc::new(Mutex::new(None));
 
     let ui = AppWindow::new().expect("Slint window");
 
@@ -1148,13 +1412,20 @@ fn main() {
     let tx = cmd_tx.clone();
     ui.on_fwd_loco_to_estimator_toggled(move |enabled| { let _ = tx.try_send(AppCommand::SetLocoFwdToEstimator(enabled)); });
 
+    let tx = cmd_tx.clone();
+    ui.on_delete_point_clicked(move |idx| { let _ = tx.try_send(AppCommand::DeletePoint(idx as usize)); });
+
+    let tx = cmd_tx.clone();
+    ui.on_duplicate_point_clicked(move |idx| { let _ = tx.try_send(AppCommand::DuplicatePoint(idx as usize)); });
+
     let ui_weak = ui.as_weak();
-    rt.spawn(async_backend(cmd_rx, ui_weak, pending_yaml, pending_shift, sample_tx, live_state.clone()));
+    rt.spawn(async_backend(cmd_rx, ui_weak, pending_yaml, pending_shift, sample_tx, live_state.clone(), markers.clone(), captured));
 
     // ── Live position 3D view ───────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
         let live_state = live_state.clone();
+        let markers = markers.clone();
         let mut scene_renderer: Option<renderer::Scene3DRenderer> = None;
 
         ui.window()
@@ -1193,11 +1464,29 @@ fn main() {
                             (current, trail)
                         };
 
+                        let extra_markers: Vec<renderer::UnitPos> = {
+                            let m = markers.lock().unwrap();
+                            let mut v = Vec::with_capacity(m.anchors.len() + m.base_stations.len());
+                            if m.show_anchors {
+                                v.extend(m.anchors.iter().map(|a| renderer::UnitPos {
+                                    x: a.pos[0], y: a.pos[1], z: a.pos[2],
+                                    color: if m.active_anchor_ids.contains(&a.id) { ANCHOR_COLOR } else { INACTIVE_MARKER_COLOR },
+                                }));
+                            }
+                            if m.show_base_stations {
+                                v.extend(m.base_stations.iter().map(|b| renderer::UnitPos {
+                                    x: b.pos[0], y: b.pos[1], z: b.pos[2],
+                                    color: if (m.active_bs_mask >> b.id) & 1 != 0 { BASE_STATION_COLOR } else { INACTIVE_MARKER_COLOR },
+                                }));
+                            }
+                            v
+                        };
+
                         let texture = renderer.render(
                             width, height,
                             app.get_cam_yaw(), app.get_cam_pitch(), app.get_cam_distance(),
                             app.get_cam_pan_x(), app.get_cam_pan_y(),
-                            VIZ_GRID_RANGE, current, &trail,
+                            VIZ_GRID_RANGE, current, &trail, &extra_markers,
                         );
                         app.set_viz_texture(texture);
 

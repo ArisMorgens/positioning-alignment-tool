@@ -241,6 +241,7 @@ impl Scene3DRenderer {
         grid_range: i32,
         current: Option<UnitPos>,
         trail_lines: &[f32],
+        markers: &[UnitPos],
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
@@ -303,6 +304,15 @@ impl Scene3DRenderer {
             let z_axis = [0.0, 0.0, 0.0, 0.0, 0.0, 2.0];
             upload_and_draw(gl, self.vbo, &z_axis);
             gl.draw_arrays(glow::LINES, 0, 2);
+
+            // Draw Loco anchor / Lighthouse base station markers
+            for marker in markers {
+                gl.uniform_1_f32(Some(&self.u_point_size), 9.0);
+                gl.uniform_3_f32(Some(&self.u_color), marker.color[0], marker.color[1], marker.color[2]);
+                let p = [marker.x, marker.y, marker.z];
+                upload_and_draw(gl, self.vbo, &p);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+            }
 
             // Draw trail of recent positions
             if trail_lines.len() >= 6 {
