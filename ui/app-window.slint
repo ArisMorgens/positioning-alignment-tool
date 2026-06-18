@@ -36,7 +36,6 @@ export component AppWindow inherits Window {
     in-out property <string> config-num-points: "4";
     in-out property <string> config-num-samples: "100";
     in-out property <string> config-settle-time: "5.0";
-    in-out property <string> config-log-period: "100";
 
     // Progress
     in-out property <int> progress-samples: 0;
@@ -239,21 +238,6 @@ export component AppWindow inherits Window {
                         }
                         LineEdit {
                             text <=> root.config-settle-time;
-                            width: 64px;
-                            enabled: !root.is-running;
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: "Log period (ms):";
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        LineEdit {
-                            text <=> root.config-log-period;
                             width: 64px;
                             enabled: !root.is-running;
                         }

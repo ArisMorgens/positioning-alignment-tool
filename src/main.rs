@@ -139,6 +139,11 @@ const LIVE_WINDOW: Duration = Duration::from_secs(5);
 /// Half-extent (in meters) of the ground grid drawn in the live 3D view.
 const VIZ_GRID_RANGE: i32 = 8;
 
+/// Period of the continuous live-position log block. Not user-configurable —
+/// there's no benefit to changing it, and it previously only took effect on
+/// the next Connect, which made it look broken when edited mid-session.
+const LIVE_LOG_PERIOD_MS: u64 = 100;
+
 /// Loco anchor / Lighthouse base station marker colors in the live 3D view.
 const ANCHOR_COLOR: [f32; 3] = [1.0, 0.65, 0.0];
 const BASE_STATION_COLOR: [f32; 3] = [0.85, 0.35, 0.95];
@@ -516,7 +521,7 @@ fn apply_shift_to_file(moving_kind: SystemKind, shift: XyzValue, ui_weak: &slint
 // ── Command bus ───────────────────────────────────────────────────────────────
 
 enum AppCommand {
-    Connect(u64),
+    Connect,
     Disconnect,
     Start(MeasurementConfig),
     Stop,
@@ -1067,7 +1072,7 @@ async fn async_backend(
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            AppCommand::Connect(log_period_ms) => {
+            AppCommand::Connect => {
                 ui_set(&ui_weak, |ui| {
                     ui.set_connection_status_text("Connecting…".into());
                     ui.set_error_text("".into());
@@ -1123,7 +1128,7 @@ async fn async_backend(
                         live_state.lock().unwrap().buffer.clear();
                         live_log_task = Some(tokio::spawn(run_live_logging(
                             connected_cf.clone(),
-                            log_period_ms,
+                            LIVE_LOG_PERIOD_MS,
                             live_state.clone(),
                             markers.clone(),
                             sample_tx.clone(),
@@ -1370,11 +1375,8 @@ fn main() {
 
     // Wire callbacks
     let tx = cmd_tx.clone();
-    let ui_weak_connect = ui.as_weak();
     ui.on_connect_clicked(move || {
-        let ui = ui_weak_connect.upgrade().unwrap();
-        let log_period_ms: u64 = ui.get_config_log_period().parse().unwrap_or(100u64).max(10);
-        let _ = tx.try_send(AppCommand::Connect(log_period_ms));
+        let _ = tx.try_send(AppCommand::Connect);
     });
 
     let tx = cmd_tx.clone();
