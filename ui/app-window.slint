@@ -1,0 +1,653 @@
+import { VerticalBox, HorizontalBox, Button, Palette, ScrollView, LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
+
+export struct PointResultData {
+    point: int,
+    base-x: string, base-y: string, base-z: string,
+    moving-x: string, moving-y: string, moving-z: string,
+    dx: string, dy: string, dz: string,
+    lh-std: string, loco-std: string,
+}
+
+export component AppWindow inherits Window {
+    title: "Positioning Alignment Tool";
+    min-width: 750px;
+    min-height: 520px;
+    preferred-width: 920px;
+    preferred-height: 660px;
+    background: Palette.background;
+
+    // Connection
+    in-out property <bool> is-connected: false;
+    in-out property <string> connection-status-text: "Disconnected";
+
+    // Workflow
+    in-out property <bool> is-running: false;
+    in-out property <bool> is-waiting-for-capture: false;
+    in-out property <bool> is-measuring: false;
+    in-out property <int> current-point: 0;
+    in-out property <int> total-points-display: 4;
+    in-out property <string> status-text: "Connect a Crazyflie via USB to begin.";
+    in-out property <string> error-text: "";
+    in-out property <string> capture-button-label: "Capture";
+
+    // Config
+    in-out property <string> config-base-system: "Lighthouse";
+    in-out property <string> config-moving-system: "Loco";
+    in-out property <string> config-num-points: "4";
+    in-out property <string> config-num-samples: "100";
+    in-out property <string> config-settle-time: "5.0";
+    in-out property <string> config-log-period: "100";
+
+    // Progress
+    in-out property <int> progress-samples: 0;
+    in-out property <int> total-samples: 100;
+    in-out property <string> current-mode: "";
+    in-out property <bool> current-mode-is-base: true;
+
+    // Live position
+    in-out property <string> live-x: "--";
+    in-out property <string> live-y: "--";
+    in-out property <string> live-z: "--";
+    in-out property <string> live-std-x: "--";
+    in-out property <string> live-std-y: "--";
+    in-out property <string> live-std-z: "--";
+
+    // 3D live position view
+    in-out property <image> viz-texture;
+    out property <float> viz-width: viz-area.width / 1px;
+    out property <float> viz-height: viz-area.height / 1px;
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 18.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Estimator source forwarding (lighthouse.fwdToEstimator / loco.fwdToEstimator)
+    in-out property <bool> fwd-lighthouse-to-estimator: true;
+    in-out property <bool> fwd-loco-to-estimator: true;
+
+    // Results
+    in-out property <[PointResultData]> point-results: [];
+    in-out property <bool> has-final-result: false;
+    in-out property <string> result-base-system: "";
+    in-out property <string> result-moving-system: "";
+    in-out property <string> shift-x: "";
+    in-out property <string> shift-y: "";
+    in-out property <string> shift-z: "";
+
+    // Callbacks
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback start-clicked();
+    callback stop-clicked();
+    callback capture-clicked();
+    callback save-result-clicked();
+    callback apply-shift-clicked();
+    callback fwd-lighthouse-to-estimator-toggled(bool);
+    callback fwd-loco-to-estimator-toggled(bool);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // ── LEFT PANEL ────────────────────────────────────────────────
+        Rectangle {
+            width: 360px;
+            background: Palette.alternate-background;
+
+            ScrollView {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+
+                    // Title
+                    Text {
+                        text: "Positioning Alignment";
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+
+                    // Connection row
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: root.is-connected ? #4caf50 : #9e9e9e;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        Text {
+                            text: root.connection-status-text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: root.is-connected ? "Disconnect" : "Connect (USB)";
+                            enabled: !root.is-running;
+                            clicked => {
+                                if (root.is-connected) {
+                                    root.disconnect-clicked();
+                                } else {
+                                    root.connect-clicked();
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Palette.border; }
+
+                    // Configuration section
+                    Text {
+                        text: "Configuration";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.35);
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Base system (stays fixed):";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        ComboBox {
+                            model: ["Loco", "Lighthouse"];
+                            current-value <=> root.config-base-system;
+                            width: 110px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "System that should move:";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        ComboBox {
+                            model: ["Loco", "Lighthouse"];
+                            current-value <=> root.config-moving-system;
+                            width: 110px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    if root.config-base-system == root.config-moving-system && root.config-base-system == "Loco": Text {
+                        text: "Base and moving systems can't both be Loco — pick at least one Lighthouse system.";
+                        font-size: 10px;
+                        color: #c62828;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.config-base-system == root.config-moving-system
+                            ? "Both systems are Lighthouse: at each point you'll capture twice without moving the Crazyflie, physically blocking/unblocking each system's base stations between captures."
+                            : "Place the Crazyflie within the overlap zone of both systems for every measurement point. The result shows the shift to apply to the moving system's positions.";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Measurement points:";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text <=> root.config-num-points;
+                            width: 64px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Samples per reading:";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text <=> root.config-num-samples;
+                            width: 64px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Settle time (s):";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text <=> root.config-settle-time;
+                            width: 64px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Log period (ms):";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text <=> root.config-log-period;
+                            width: 64px;
+                            enabled: !root.is-running;
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Palette.border; }
+
+                    // Start / Stop
+                    Button {
+                        text: root.is-running ? "Stop" : "Start Alignment";
+                        primary: !root.is-running && root.is-connected;
+                        enabled: root.is-connected && !(root.config-base-system == root.config-moving-system && root.config-base-system == "Loco");
+                        clicked => {
+                            if (root.is-running) {
+                                root.stop-clicked();
+                            } else {
+                                root.start-clicked();
+                            }
+                        }
+                    }
+
+                    // Status instruction box
+                    Rectangle {
+                        background: Palette.background;
+                        border-radius: 6px;
+                        min-height: 50px;
+
+                        VerticalLayout {
+                            padding: 8px;
+                            Text {
+                                text: root.status-text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // "Capture" button — only visible while waiting for the user to confirm a capture step
+                    if root.is-waiting-for-capture: Button {
+                        text: root.capture-button-label;
+                        primary: true;
+                        clicked => { root.capture-clicked(); }
+                    }
+
+                    // Per-point results table
+                    if root.point-results.length > 0: Rectangle {
+                        height: 1px;
+                        background: Palette.border;
+                    }
+
+                    if root.point-results.length > 0: VerticalLayout {
+                        spacing: 4px;
+
+                        Text {
+                            text: "Measurement Points";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+
+                        // Header row
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Text { text: "Pt"; font-size: 10px; font-weight: 600; width: 22px; }
+                            Text { text: "ΔX"; font-size: 10px; font-weight: 600; width: 48px; }
+                            Text { text: "ΔY"; font-size: 10px; font-weight: 600; width: 48px; }
+                            Text { text: "ΔZ"; font-size: 10px; font-weight: 600; width: 48px; }
+                            Text { text: "σ LH"; font-size: 10px; font-weight: 600; width: 48px; }
+                            Text { text: "σ Loco"; font-size: 10px; font-weight: 600; horizontal-stretch: 1; }
+                        }
+
+                        for r in root.point-results: Rectangle {
+                            height: 20px;
+                            border-radius: 2px;
+                            background: transparent;
+
+                            HorizontalLayout {
+                                spacing: 2px;
+                                Text { text: r.point; font-size: 11px; width: 22px; vertical-alignment: center; }
+                                Text { text: r.dx; font-size: 11px; width: 48px; vertical-alignment: center; }
+                                Text { text: r.dy; font-size: 11px; width: 48px; vertical-alignment: center; }
+                                Text { text: r.dz; font-size: 11px; width: 48px; vertical-alignment: center; }
+                                Text { text: r.lh-std; font-size: 11px; width: 48px; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
+                                Text { text: r.loco-std; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
+                            }
+                        }
+                    }
+
+                    // Final result section
+                    if root.has-final-result: Rectangle {
+                        height: 1px;
+                        background: Palette.border;
+                    }
+
+                    if root.has-final-result: VerticalLayout {
+                        spacing: 6px;
+
+                        Rectangle {
+                            background: #e8f5e9;
+                            border-radius: 4px;
+                            height: 30px;
+                            HorizontalLayout {
+                                alignment: center;
+                                Text {
+                                    text: "Alignment complete";
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #2e7d32;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            background: #fff3e0;
+                            border-radius: 4px;
+                            min-height: 64px;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 4px;
+
+                                Text {
+                                    text: root.result-moving-system + " must move (base: " + root.result-base-system + "):";
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #e65100;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: "X  " + root.shift-x + " m"; font-size: 12px; horizontal-stretch: 1; font-weight: 600; }
+                                    Text { text: "Y  " + root.shift-y + " m"; font-size: 12px; horizontal-stretch: 1; font-weight: 600; }
+                                    Text { text: "Z  " + root.shift-z + " m"; font-size: 12px; horizontal-stretch: 1; font-weight: 600; }
+                                }
+                            }
+                        }
+
+                        Button {
+                            text: "Save report to YAML…";
+                            primary: true;
+                            clicked => { root.save-result-clicked(); }
+                        }
+
+                        Button {
+                            text: "Apply shift to " + root.result-moving-system + " positions YAML…";
+                            clicked => { root.apply-shift-clicked(); }
+                        }
+                    }
+
+                    // Error display
+                    if root.error-text != "": Rectangle {
+                        background: #ffcdd2;
+                        border-radius: 4px;
+                        min-height: 28px;
+                        VerticalLayout {
+                            padding: 6px;
+                            TextInput {
+                                text: root.error-text;
+                                font-size: 11px;
+                                color: #b71c1c;
+                                wrap: word-wrap;
+                                read-only: true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── RIGHT PANEL ────────────────────────────────────────────────
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Palette.background;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                // Live position label
+                Text {
+                    text: "Live Position";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.35);
+                    horizontal-alignment: center;
+                }
+
+                // X / Y / Z big numbers, with rolling 5s std dev underneath
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 32px;
+
+                    for axis in [
+                        { label: "X", value: root.live-x, std: root.live-std-x },
+                        { label: "Y", value: root.live-y, std: root.live-std-y },
+                        { label: "Z", value: root.live-z, std: root.live-std-z },
+                    ]: VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: axis.label;
+                            font-size: 12px;
+                            color: Palette.foreground.transparentize(0.4);
+                            horizontal-alignment: center;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 3px;
+                            alignment: center;
+                            Text {
+                                text: axis.value;
+                                font-size: 26px;
+                                font-weight: 700;
+                                horizontal-alignment: right;
+                            }
+                            Text {
+                                text: "m";
+                                font-size: 14px;
+                                color: Palette.foreground.transparentize(0.4);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "σ(5s) " + axis.std + " m";
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // 3D live position view — grid + axes + current position + 5s trail
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 220px;
+                    border-radius: 8px;
+                    clip: true;
+                    background: #1f1f26;
+
+                    viz-area := Rectangle {
+                        width: 100%;
+                        height: 100%;
+
+                        Image {
+                            source: root.viz-texture;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: fill;
+                        }
+
+                        TouchArea {
+                            property <float> prev-x;
+                            property <float> prev-y;
+                            property <bool> dragging;
+
+                            scroll-event(e) => {
+                                if (e.delta-y > 0) {
+                                    root.cam-distance = max(2.0, root.cam-distance - 1.0);
+                                } else if (e.delta-y < 0) {
+                                    root.cam-distance = min(60.0, root.cam-distance + 1.0);
+                                }
+                                accept
+                            }
+
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    self.prev-x = self.mouse-x / 1px;
+                                    self.prev-y = self.mouse-y / 1px;
+                                    self.dragging = true;
+                                } else if (e.kind == PointerEventKind.up) {
+                                    self.dragging = false;
+                                }
+                            }
+
+                            moved => {
+                                if (self.dragging) {
+                                    root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                                    root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                                    self.prev-x = self.mouse-x / 1px;
+                                    self.prev-y = self.mouse-y / 1px;
+                                }
+                            }
+                        }
+
+                        // Estimator source toggles — overlaid at the bottom-left of the 3D view
+                        Rectangle {
+                            x: 8px;
+                            y: parent.height - self.height - 8px;
+                            width: 190px;
+                            height: 64px;
+                            background: #000000a0;
+                            border-radius: 6px;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 2px;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    CheckBox {
+                                        checked <=> root.fwd-lighthouse-to-estimator;
+                                        enabled: root.is-connected && !root.is-running;
+                                        toggled => { root.fwd-lighthouse-to-estimator-toggled(self.checked); }
+                                    }
+                                    Text {
+                                        text: "Lighthouse \u{2192} estimator";
+                                        color: white;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    CheckBox {
+                                        checked <=> root.fwd-loco-to-estimator;
+                                        enabled: root.is-connected && !root.is-running;
+                                        toggled => { root.fwd-loco-to-estimator-toggled(self.checked); }
+                                    }
+                                    Text {
+                                        text: "Loco \u{2192} estimator";
+                                        color: white;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Active mode pill
+                HorizontalLayout {
+                    alignment: center;
+                    height: 30px;
+
+                    if root.current-mode != "": Rectangle {
+                        border-radius: 15px;
+                        background: root.current-mode-is-base ? #1565c0 : #e65100;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: root.current-mode;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Sample progress bar (only while measuring)
+                if root.is-measuring: VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Samples";
+                            font-size: 11px;
+                            color: Palette.foreground.transparentize(0.4);
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.progress-samples + " / " + root.total-samples;
+                            font-size: 11px;
+                            color: Palette.foreground.transparentize(0.4);
+                        }
+                    }
+
+                    Rectangle {
+                        height: 6px;
+                        border-radius: 3px;
+                        background: Palette.border;
+
+                        Rectangle {
+                            x: 0; y: 0;
+                            height: parent.height;
+                            border-radius: 3px;
+                            background: #4caf50;
+                            width: root.total-samples > 0
+                                ? parent.width * root.progress-samples / root.total-samples
+                                : 0px;
+                        }
+                    }
+                }
+
+            }
+        }
+    }
+}
