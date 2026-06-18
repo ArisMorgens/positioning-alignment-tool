@@ -5,7 +5,7 @@ export struct PointResultData {
     base-x: string, base-y: string, base-z: string,
     moving-x: string, moving-y: string, moving-z: string,
     dx: string, dy: string, dz: string,
-    lh-std: string, loco-std: string,
+    base-std: string, moving-std: string,
 }
 
 export component AppWindow inherits Window {
@@ -305,8 +305,8 @@ export component AppWindow inherits Window {
                             Text { text: "ΔX"; font-size: 10px; font-weight: 600; width: 48px; }
                             Text { text: "ΔY"; font-size: 10px; font-weight: 600; width: 48px; }
                             Text { text: "ΔZ"; font-size: 10px; font-weight: 600; width: 48px; }
-                            Text { text: "σ LH"; font-size: 10px; font-weight: 600; width: 48px; }
-                            Text { text: "σ Loco"; font-size: 10px; font-weight: 600; horizontal-stretch: 1; }
+                            Text { text: "σ Base"; font-size: 10px; font-weight: 600; width: 56px; }
+                            Text { text: "σ Moving"; font-size: 10px; font-weight: 600; horizontal-stretch: 1; }
                         }
 
                         for r in root.point-results: Rectangle {
@@ -320,8 +320,8 @@ export component AppWindow inherits Window {
                                 Text { text: r.dx; font-size: 11px; width: 48px; vertical-alignment: center; }
                                 Text { text: r.dy; font-size: 11px; width: 48px; vertical-alignment: center; }
                                 Text { text: r.dz; font-size: 11px; width: 48px; vertical-alignment: center; }
-                                Text { text: r.lh-std; font-size: 11px; width: 48px; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
-                                Text { text: r.loco-std; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
+                                Text { text: r.base-std; font-size: 11px; width: 56px; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
+                                Text { text: r.moving-std; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; color: Palette.foreground.transparentize(0.35); }
 
                                 // Delete/duplicate this point — only once the run is done, to avoid
                                 // editing a table that's still being appended to mid-capture.

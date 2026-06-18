@@ -70,6 +70,7 @@ impl SystemKind {
         }
     }
 
+
     /// (lighthouse.fwdToEstimator, loco.fwdToEstimator) for isolating this system in the estimator.
     fn estimator_sources(&self) -> (u8, u8) {
         match self {
@@ -322,20 +323,11 @@ struct CapturedResults {
 /// Builds the displayed table row for `results[point_idx]`. The 1-based "Pt"
 /// number comes from `point_idx` (its position in the vector), not anything
 /// captured at measurement time, so renumbering after delete/duplicate is automatic.
-fn point_result_row(point_idx: usize, point: &PointResult, base_kind: SystemKind, moving_kind: SystemKind) -> PointResultData {
-    // Per-system combined std dev for this point, regardless of which
-    // role (base/moving) each system played.
-    let lh_std = match (base_kind, moving_kind) {
-        (SystemKind::Lighthouse, _) => Some(point.base.total_std()),
-        (_, SystemKind::Lighthouse) => Some(point.moving.total_std()),
-        _ => None,
-    };
-    let loco_std = match (base_kind, moving_kind) {
-        (SystemKind::Loco, _) => Some(point.base.total_std()),
-        (_, SystemKind::Loco) => Some(point.moving.total_std()),
-        _ => None,
-    };
-
+///
+/// The std-dev columns always show the base and moving capture's own spread —
+/// by role, not by system type — so a Lighthouse-vs-Lighthouse (or Loco-vs-Loco)
+/// run still shows both systems' std devs instead of one column going unused.
+fn point_result_row(point_idx: usize, point: &PointResult) -> PointResultData {
     PointResultData {
         point: (point_idx + 1) as i32,
         base_x: format!("{:.3}", point.base.mean_x).into(),
@@ -347,8 +339,8 @@ fn point_result_row(point_idx: usize, point: &PointResult, base_kind: SystemKind
         dx: format!("{:+.3}", point.dx()).into(),
         dy: format!("{:+.3}", point.dy()).into(),
         dz: format!("{:+.3}", point.dz()).into(),
-        lh_std: lh_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string()).into(),
-        loco_std: loco_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string()).into(),
+        base_std: format!("{:.3}", point.base.total_std()).into(),
+        moving_std: format!("{:.3}", point.moving.total_std()).into(),
     }
 }
 
@@ -379,7 +371,7 @@ fn refresh_results_ui(
     let rows: Vec<PointResultData> = results
         .iter()
         .enumerate()
-        .map(|(i, p)| point_result_row(i, p, base_kind, moving_kind))
+        .map(|(i, p)| point_result_row(i, p))
         .collect();
 
     let ar = build_alignment_result(results, base_kind, moving_kind);
@@ -911,40 +903,8 @@ async fn run_measurement(
         let point = PointResult { base: base_stats, moving: moving_stats };
 
         {
-            let dx = format!("{:+.3}", point.dx());
-            let dy = format!("{:+.3}", point.dy());
-            let dz = format!("{:+.3}", point.dz());
-            let bx = format!("{:.3}", point.base.mean_x);
-            let by = format!("{:.3}", point.base.mean_y);
-            let bz = format!("{:.3}", point.base.mean_z);
-            let mx = format!("{:.3}", point.moving.mean_x);
-            let my = format!("{:.3}", point.moving.mean_y);
-            let mz = format!("{:.3}", point.moving.mean_z);
-            let pt_num = (point_idx + 1) as i32;
-
-            // Per-system combined std dev for this point, regardless of which
-            // role (base/moving) each system played.
-            let lh_std = match (config.base_kind, config.moving_kind) {
-                (SystemKind::Lighthouse, _) => Some(point.base.total_std()),
-                (_, SystemKind::Lighthouse) => Some(point.moving.total_std()),
-                _ => None,
-            };
-            let loco_std = match (config.base_kind, config.moving_kind) {
-                (SystemKind::Loco, _) => Some(point.base.total_std()),
-                (_, SystemKind::Loco) => Some(point.moving.total_std()),
-                _ => None,
-            };
-            let lh_std = lh_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string());
-            let loco_std = loco_std.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "--".to_string());
-
+            let row = point_result_row(point_idx, &point);
             ui_set(&ui_weak, move |ui| {
-                let row = PointResultData {
-                    point: pt_num,
-                    base_x: bx.into(), base_y: by.into(), base_z: bz.into(),
-                    moving_x: mx.into(), moving_y: my.into(), moving_z: mz.into(),
-                    dx: dx.into(), dy: dy.into(), dz: dz.into(),
-                    lh_std: lh_std.into(), loco_std: loco_std.into(),
-                };
                 let model = ui.get_point_results();
                 let mut rows: Vec<PointResultData> = (0..model.row_count())
                     .map(|i| model.row_data(i).unwrap())
